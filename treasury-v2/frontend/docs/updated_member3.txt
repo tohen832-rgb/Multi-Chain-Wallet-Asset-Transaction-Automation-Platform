@@ -1,0 +1,445 @@
+═══════════════════════════════════════════════════════════════
+  MEMBER 3 — SERVICE C: DASHBOARD, AUTH & LOGGING (UPDATED)
+  Matches existing dark theme UI. Adds: auth, live monitoring,
+  campaign state machine, logs, admin panels
+═══════════════════════════════════════════════════════════════
+
+
+───────────────────────────────────────
+ STEP 1: AUTH SYSTEM — Add login before existing modals
+───────────────────────────────────────
+
+@workspace The existing app has task creation modals (Create Swap Task, Create Task, Create Withdraw Task) with a dark theme UI but NO authentication. Anyone can access everything.
+
+Add a complete auth system that gates ALL existing functionality:
+
+1. Login Page (same dark theme as existing modals):
+   - Dark background matching existing app (#1a1a2e or similar)
+   - Centered card with:
+     "Treasury Distributor" title
+     Email input (dark bordered, same style as existing inputs)
+     Password input (same style)
+     "Sign In" button (blue, same as existing "Submit" buttons)
+   - Error messages: "Invalid credentials" / "Account suspended"
+   - After login: redirect to main dashboard
+
+2. AuthService (auth.service.ts):
+   - register(email, password, role):
+     * Hash with bcryptjs (12 rounds)
+     * Default role = VIEWER
+     * Only ADMIN can create ADMIN/OPERATOR users
+   - login(email, password):
+     * Validate credentials
+     * Rate limit: 5 failed attempts per 15 min (Redis counter)
+     * 10 consecutive failures: suspend account
+     * Return { accessToken (JWT, 15min), refreshToken (7 days) }
+     * JWT payload: { userId, email, role, iat, exp }
+   - refreshToken(token): Issue new access token
+   - verifyToken(token): Decode + validate
+
+3. RBAC Roles:
+   ADMIN: Everything. Manage users, approve templates, change return addresses.
+   OPERATOR: Create tasks, start/pause/stop airdrops, fund wallets, execute swaps.
+   VIEWER: Read-only. View tasks, dashboards, logs.
+
+4. Middleware:
+   - authMiddleware: Check Bearer token on ALL /api/ routes
+   - roleMiddleware(minRole): ADMIN > OPERATOR > VIEWER
+   - freshAuthMiddleware: For return wallet changes, require JWT < 5 min old
+
+5. Frontend auth context (auth-context.tsx):
+   - AuthProvider wrapping the app
+   - Store tokens in memory (NOT localStorage — security)
+   - Auto-refresh before expiry
+   - useAuth() hook: { user, login, logout, isAuthenticated, role }
+
+6. Gate existing modals:
+   - Create Swap Task: requires OPERATOR or ADMIN
+   - Create Task: requires OPERATOR or ADMIN  
+   - Create Withdraw Task: requires OPERATOR or ADMIN
+   - View tasks: requires any authenticated user
+   - Admin functions: requires ADMIN only
+
+7. Add user info to top-right of existing UI:
+   Small area showing: "admin@treasury.local" + role badge + "Logout" link
+   Same dark theme styling.
+
+API endpoints:
+  POST /api/auth/login { email, password }
+  POST /api/auth/register { email, password, role } — admin only
+  POST /api/auth/refresh { refreshToken }
+  POST /api/auth/logout
+
+Database: users table, sessions table
+
+
+───────────────────────────────────────
+ STEP 2: MAIN DASHBOARD — Task overview page
+───────────────────────────────────────
+
+@workspace Create a main dashboard page that shows BEFORE users open any task creation modals. Currently the app seems to go straight to task creation. Add a dashboard home page.
+
+Match the existing dark theme. The dashboard shows all tasks and their status.
+
+Dashboard Page Layout (dark theme):
+
+TOP ROW — 4 stat cards (dark cards with colored left border):
+┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
+│ Active Tasks │ │ Contracts   │ │ Transfers   │ │ Gas Status  │
+│     12       │ │     47      │ │  23,400     │ │   32 Gwei   │
+│  +3 today    │ │  5 deploying│ │  / 50,000   │ │  ● Normal   │
+└─────────────┘ └─────────────┘ └─────────────┘ └─────────────┘
+
+MIDDLE — Active Tasks Table (dark table, matching existing input styling):
+Columns: Task ID | Type | Status | Contracts | Progress | Gas | Actions
+Row example:
+#22 | Deploy+Airdrop | AIRDROP_ACTIVE | 5 contracts | ████░░ 72% | 32 Gwei ● | [Pause] [Stop]
+#23 | Swap | SWAPPING | — | ██░░░░ 30% | — | [View]
+#24 | Deploy+Airdrop | PAUSED | 3 contracts | ████░░ 65% | 85 Gwei ● | [Resume] [Stop]
+
+Status badges (colored pills matching dark theme):
+- CREATED: gray
+- SWAPPING: blue
+- AIRDROP_ACTIVE: green  
+- PAUSED: amber/yellow
+- STOPPED: red
+- COMPLETED: dark green
+- FAILED: red with border
+
+Action buttons:
+- "Create Swap Task" button (opens existing modal)
+- "Create Task" button (opens existing modal)
+- "Create Withdraw Task" button (opens existing modal)
+- Each row has context-appropriate action buttons
+
+BOTTOM — Recent Activity Feed:
+Timeline list showing last 20 events:
+"12:34 — Task #22: Batch 47/65 completed (100 transfers, 0.003 ETH gas)"
+"12:33 — Task #22: Gas check passed (32 Gwei < 50 Gwei threshold)"
+"12:30 — Task #24: Paused — gas exceeded threshold (85 Gwei > 50 Gwei)"
+
+All data from: GET /api/dashboard/stats, GET /api/tasks, GET /api/events/recent
+
+
+───────────────────────────────────────
+ STEP 3: TASK DETAIL PAGE — Live monitoring
+───────────────────────────────────────
+
+@workspace Create a task detail page. When a user clicks a task row in the dashboard, they see the full detail with live monitoring.
+
+Task Detail Page (dark theme, same styling):
+
+HEADER:
+Task #22 — "My Airdrop Campaign"    [AIRDROP_ACTIVE] green badge
+Created: 2026-03-17 10:00 UTC        By: admin@treasury.local
+
+STATE MACHINE VISUALIZER:
+Horizontal step indicator (dark background, connected dots):
+● Created → ● Funded → ● Swapped → ● Deployed → ● Funded Contract → ◉ Airdrop Active → ○ Stopped → ○ Withdrawn → ○ Completed
+(Current step highlighted in blue, completed in green, future in gray)
+Click any completed step to see its transaction details.
+
+CONTROLS BAR:
+[Pause Airdrop] (amber button)  [Stop Airdrop] (red button)
+Only show buttons that make sense for current state.
+- AIRDROP_ACTIVE: show Pause + Stop
+- PAUSED: show Resume + Stop  
+- STOPPED: show Withdraw
+- WITHDRAWN: show "Transfer to Return Wallet"
+
+LIVE STATS (4 cards, update via WebSocket/Socket.io):
+┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐
+│ Transfers        │ │ Distributed      │ │ Batches          │ │ Gas              │
+│ 3,750 / 5,000    │ │ 3,750 TOKEN      │ │ 47 / 65          │ │ 32 Gwei          │
+│ ████████░░ 75%   │ │ ≈ $10,200        │ │ ████████░░ 72%   │ │ Threshold: 50    │
+│                  │ │                  │ │ 2 failed         │ │ ● Below threshold│
+└──────────────────┘ └──────────────────┘ └──────────────────┘ └──────────────────┘
+
+CONTRACTS TABLE:
+For tasks with multiple contracts (Contract Count = 5):
+| # | Contract Address      | Sub-wallet          | Status   | Transfers | Balance |
+|---|----------------------|--------------------|-----------|-----------|---------| 
+| 1 | 0xb625...D676        | 0x7aB3...9f21      | Active   | 800/1000  | 200 TKN |
+| 2 | 0xc731...A892        | 0x8bC4...0g32      | Active   | 750/1000  | 250 TKN |
+| 3 | 0xd842...B903        | 0x9cD5...1h43      | Paused   | 700/1000  | 300 TKN |
+| 4 | 0xe953...C014        | 0xaDE6...2i54      | Active   | 800/1000  | 200 TKN |
+| 5 | 0xfa64...D125        | 0xbEF7...3j65      | Active   | 700/1000  | 300 TKN |
+
+BATCH TABLE (paginated):
+| Batch | Status    | Recipients | Amount     | Gas Used | Tx Hash          | Time     |
+|-------|-----------|-----------|------------|----------|-----------------|----------|
+| #47   | Completed | 100       | 100 TOKEN  | 0.003 ETH| 0xab12...cd34   | 12:34    |
+| #46   | Completed | 100       | 100 TOKEN  | 0.003 ETH| 0xef56...gh78   | 12:33    |
+| #45   | Failed    | 100       | 100 TOKEN  | —        | —               | 12:32    |
+Tx Hash is a clickable link to Etherscan.
+
+TRANSACTION TIMELINE (right sidebar or bottom):
+Vertical timeline showing all events for this task:
+🟢 12:34 — Batch #47 completed (100 transfers)
+🟢 12:33 — Gas check passed (32 Gwei)
+🔴 12:32 — Batch #45 failed: out of gas (retrying...)
+🟡 12:30 — Gas check: 48 Gwei (close to threshold)
+🟢 10:05 — Contract funded (1250 TOKEN)
+🟢 10:03 — Contract deployed at 0xb625...D676
+🟢 10:01 — Sub-wallet funded (0.003 ETH + 4 tokens)
+🟢 10:00 — Task created
+
+Real-time updates: Use Socket.io namespace /tasks/:taskId
+When new event arrives: prepend to timeline, update stats cards with animation.
+
+
+───────────────────────────────────────
+ STEP 4: CAMPAIGN ORCHESTRATOR (backend)
+───────────────────────────────────────
+
+@workspace Create the campaign orchestrator service. This is the backend brain that coordinates between wallet-service and contract-service.
+
+CampaignOrchestratorService (campaign-orchestrator.service.ts):
+
+This service does NOT interact with blockchain directly. It calls:
+- wallet-service (port 3001) for wallet + swap operations
+- contract-service (port 3002) for deploy + airdrop operations
+
+STATE MACHINE — enforce these transitions:
+CREATED → WALLET_GENERATED → FUNDED → SWAPPING → SWAPPED → 
+DEPLOYING → DEPLOYED → CONTRACT_FUNDED → AIRDROP_ACTIVE →
+PAUSED ↔ AIRDROP_ACTIVE → STOPPED → WITHDRAWING → WITHDRAWN → 
+RETURNED → COMPLETED
+
+Error states: SWAP_FAILED (retry from FUNDED), DEPLOY_FAILED (retry from SWAPPED)
+
+Every action:
+1. Verify current state allows the transition
+2. Call the appropriate service API
+3. Record state change in campaign_state_history table
+4. Emit event via Socket.io for live UI updates
+
+Methods:
+- createCampaign(config) → save CREATED, call wallet-service to generate sub-wallet
+- fundCampaign(id) → call wallet-service to fund sub-wallet  
+- startSwap(id, swapConfig) → call wallet-service to execute swap
+- deployContract(id, templateId) → call contract-service to deploy
+- fundContract(id) → call contract-service to fund contract
+- startAirdrop(id, recipients) → call contract-service to start airdrop
+- pauseAirdrop(id) → call contract-service
+- resumeAirdrop(id) → call contract-service  
+- stopAirdrop(id) → call contract-service
+- withdrawRemaining(id) → call contract-service
+- transferToReturn(id) → call wallet-service
+
+Event Consumer (events/consumer.ts):
+- Subscribe to RabbitMQ exchange "treasury.events"
+- For each event: update campaign state + emit Socket.io update + save log
+- Events: WALLET_GENERATED, WALLET_FUNDED, SWAP_COMPLETED, SWAP_FAILED, 
+  CONTRACT_DEPLOYED, CONTRACT_FUNDED, AIRDROP_STARTED, AIRDROP_PAUSED,
+  AIRDROP_STOPPED, WITHDRAW_COMPLETED, RETURN_COMPLETED
+
+API Client (lib/api-client.ts):
+- WalletServiceClient: typed methods for http://wallet-service:3001/api/*
+- ContractServiceClient: typed methods for http://contract-service:3002/api/*
+- Both: forward JWT in Authorization header, 30s timeout, retry on 5xx
+
+Campaign database:
+campaigns: id, name, status (all states), user_id, sub_wallet_address,
+  contract_addresses (json array), return_wallet_address, token_address,
+  target_token_address, fund_amount, transfer_limit, gas_threshold,
+  transfer_count, total_distributed, batch_size, recipient_count,
+  created_at, updated_at, completed_at
+
+campaign_state_history: id, campaign_id, from_state, to_state,
+  triggered_by (userId or "SYSTEM"), reason, tx_hash, timestamp
+
+
+───────────────────────────────────────
+ STEP 5: REAL-TIME + SOCKET.IO
+───────────────────────────────────────
+
+@workspace Set up Socket.io for real-time dashboard updates. The task detail page and main dashboard need live data without polling.
+
+NotificationService (notification.service.ts):
+1. Socket.io server on port 3000, namespace /live
+2. Authentication: validate JWT from handshake auth header
+3. Rooms:
+   - "dashboard" — all connected users (for stat card updates)
+   - "task:{taskId}" — users viewing a specific task detail
+4. Events emitted to clients:
+   - "stats:update" { activeTasks, totalContracts, totalTransfers, gasPrice }
+   - "task:update" { taskId, status, transferCount, batchesCompleted, ... }
+   - "task:batch" { taskId, batchId, status, txHash, gasUsed }
+   - "task:gas" { taskId, gasPrice, isAcceptable, threshold }
+   - "task:error" { taskId, message, severity }
+   - "alert" { message, severity, taskId? }
+
+Frontend Socket.io (lib/socket.ts):
+- useTaskSocket(taskId) hook:
+  * Connect to /live namespace with JWT
+  * Join "task:{taskId}" room
+  * Return { stats, batches, events, isConnected }
+  * Auto-reconnect on disconnect
+  
+- useDashboardSocket() hook:
+  * Join "dashboard" room
+  * Return { globalStats, recentEvents }
+
+RabbitMQ Consumer → Socket.io bridge:
+- For each RabbitMQ event from wallet-service/contract-service:
+  a. Save to event_logs (append-only)
+  b. Update campaign state
+  c. Emit appropriate Socket.io event to correct rooms
+
+
+───────────────────────────────────────
+ STEP 6: ADMIN PAGES (matching dark theme)
+───────────────────────────────────────
+
+@workspace Create admin pages. Only visible to ADMIN role users. Same dark theme as all existing UI.
+
+1. Template Management Page (/admin/templates):
+   - Table: Name | Version | Status (badge) | Hash (truncated) | Approved By | Date
+   - "Upload Template" button → modal (dark, same style as Create Task):
+     * Template Name input
+     * Version input  
+     * Bytecode file upload
+     * ABI file upload
+     * "Upload" button
+   - Per-row actions:
+     * PENDING templates: "Approve" button (green)
+     * APPROVED templates: "Deprecate" button (red)
+   - Only ADMIN can see this page
+
+2. User Management Page (/admin/users):
+   - Table: Email | Role (dropdown) | Status | Last Login | Created
+   - "Create User" button → modal:
+     * Email input
+     * Password input
+     * Role dropdown (ADMIN / OPERATOR / VIEWER)
+     * "Create" button
+   - Per-row actions:
+     * Change role dropdown (saves immediately)
+     * "Suspend" / "Activate" toggle
+
+3. Wallet Management Page (/admin/wallets):
+   - Table: Label | Address (truncated) | Balance (ETH) | Last Used | Created
+   - "Import Wallet" button → modal (the secure one from Member 1)
+   - "Delete" button per row (requires confirmation)
+   - NEVER shows private keys in any column
+
+4. Return Address Whitelist Page (/admin/return-addresses):
+   - Table: Address | Label | Added By | Date
+   - "Add Address" button
+   - "Remove" button per row
+
+
+───────────────────────────────────────
+ STEP 7: LOGGING & AUDIT TRAIL
+───────────────────────────────────────
+
+@workspace Create the logging system and log viewer page. Dark theme.
+
+LogService (log.service.ts):
+1. logEvent(event):
+   - Generate ULID (time-ordered ID)
+   - Calculate chain hash: sha256(JSON.stringify(event) + previousHash)
+   - INSERT into event_logs — NEVER update or delete
+   
+2. queryLogs(filters):
+   - Filters: taskId, eventType, severity, dateFrom, dateTo, actor
+   - Pagination: page, limit (max 100)
+   - Return { logs, total, pages }
+
+3. exportLogs(filters, format): CSV or JSON stream
+
+4. logAuditAction(userId, action, resource, oldValue, newValue, req):
+   - Save to audit_trail table with IP + user agent
+
+Database:
+event_logs: id (ULID), task_id, event_type, severity (INFO|WARN|ERROR|CRITICAL),
+  actor_type (USER|SYSTEM), actor_id, payload_json, tx_hash, chain_hash, timestamp
+  NO UPDATE/DELETE permissions on this table.
+
+audit_trail: id, user_id, action, resource_type, resource_id,
+  old_value_json, new_value_json, ip_address, user_agent, timestamp
+
+Log Viewer Page (/logs) — dark theme:
+- Filter bar at top:
+  * Task dropdown (multi-select)
+  * Event Type dropdown (multi-select): FUND, SWAP, DEPLOY, AIRDROP, WITHDRAW, ERROR
+  * Severity pills: [INFO] [WARN] [ERROR] [CRITICAL] — click to toggle
+  * Date range picker
+  * "Export CSV" button / "Export JSON" button
+- Log table:
+  | Time | Task | Event | Severity (badge) | Actor | Details | Tx Hash |
+  Severity badges: INFO=gray, WARN=amber, ERROR=red, CRITICAL=red-bold
+  "Details" column is expandable — click to show full payload JSON
+  Tx Hash links to Etherscan
+- Pagination at bottom: 50 rows per page
+
+
+───────────────────────────────────────
+ STEP 8: NAV SIDEBAR + LAYOUT
+───────────────────────────────────────
+
+@workspace Add a sidebar navigation to the existing app. Currently the app seems to have modals but no navigation structure.
+
+Sidebar (dark theme, left side, collapsible):
+Width: 240px expanded, 60px collapsed (icon only)
+
+Menu items (with icons):
+📊 Dashboard        → /dashboard (main stats + task table)
+📋 Tasks            → /tasks (all tasks list)
+🔄 Swap Tasks       → /tasks?type=swap
+➕ Create Task       → opens Create Task modal
+➕ Create Swap       → opens Create Swap Task modal
+💰 Withdraw         → opens Create Withdraw Task modal
+─── Admin ─── (only visible for ADMIN role)
+📝 Templates        → /admin/templates
+👥 Users            → /admin/users
+🔑 Wallets          → /admin/wallets
+📍 Return Addresses → /admin/return-addresses
+─── System ───
+📜 Logs             → /logs
+⚙️ Settings         → /settings
+
+Bottom of sidebar:
+User email + role badge
+"Logout" link
+
+App layout:
+┌─────────┬──────────────────────────────────┐
+│ Sidebar │  Main content area               │
+│         │  (dashboard / task detail / etc.) │
+│         │                                  │
+│         │  Modals overlay on top           │
+│         │  (Create Swap, Create Task, etc.) │
+└─────────┴──────────────────────────────────┘
+
+Dark theme throughout. Sidebar has slightly darker background than content area.
+
+
+───────────────────────────────────────
+ STEP 9: TESTS + DOCKER
+───────────────────────────────────────
+
+@workspace Generate tests and deployment config for dashboard-service:
+
+1. Unit tests:
+   - auth.service.test.ts: Login, register, token refresh, rate limiting
+   - campaign-orchestrator.test.ts: State machine transitions, reject invalid
+   - log.service.test.ts: Append-only, chain hash verification
+
+2. E2E tests (Playwright or Cypress):
+   - Login flow
+   - Create task flow (fill modal, submit)
+   - Dashboard shows new task
+   - Task detail shows live updates
+
+3. Dockerfile:
+   Multi-stage Next.js build, node:20-alpine, port 3000
+
+4. Migrations:
+   - users, sessions, campaigns, campaign_state_history,
+     event_logs, audit_trail tables
+
+5. Seed data:
+   - Default admin: admin@treasury.local / changeme123
+   - Default viewer: viewer@treasury.local / viewonly123
