@@ -1,13 +1,16 @@
-version: '3.8'
 services:
   backend:
     build: ./backend
     ports: ["3001:3001"]
     depends_on:
-      postgres: { condition: service_healthy }
+      scylladb: { condition: service_healthy }
       redis: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
     env_file: .env
+    environment:
+      - SCYLLA_CONTACT_POINTS=scylladb
+      - REDIS_URL=redis://redis:6379
+      - RABBITMQ_URL=amqp://treasury:treasury_dev@rabbitmq:5672
     restart: unless-stopped
     networks: [app]
 
@@ -20,12 +23,12 @@ services:
     restart: unless-stopped
     networks: [app]
 
-  postgres:
-    image: postgres:16-alpine
-    ports: ["5432:5432"]
-    environment: { POSTGRES_DB: treasury, POSTGRES_USER: treasury, POSTGRES_PASSWORD: treasury_dev }
-    volumes: [pgdata:/var/lib/postgresql/data]
-    healthcheck: { test: ["CMD-SHELL","pg_isready -U treasury"], interval: 5s, timeout: 5s, retries: 5 }
+  scylladb:
+    image: scylladb/scylla
+    command: ["--smp", "1", "--memory", "1G", "--overprovisioned", "1", "--developer-mode", "1"]
+    ports: ["9042:9042"]
+    volumes: [scylladata:/var/lib/scylla]
+    healthcheck: { test: ["CMD-SHELL","cqlsh -e \"DESCRIBE KEYSPACES\" > /dev/null 2>&1"], interval: 10s, timeout: 10s, retries: 15, start_period: 30s }
     networks: [app]
 
   redis:
@@ -43,5 +46,5 @@ services:
     healthcheck: { test: ["CMD","rabbitmq-diagnostics","-q","check_running"], interval: 10s, timeout: 10s, retries: 5 }
     networks: [app]
 
-volumes: { pgdata: {}, redisdata: {}, mqdata: {} }
+volumes: { scylladata: {}, redisdata: {}, mqdata: {} }
 networks: { app: { driver: bridge } }

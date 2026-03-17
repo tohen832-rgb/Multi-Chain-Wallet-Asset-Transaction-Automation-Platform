@@ -2,14 +2,15 @@
   "name": "treasury-backend",
   "version": "1.0.0",
   "scripts": {
-    "dev": "nodemon --exec ts-node src/server.ts",
-    "build": "tsc",
+    "dev": "node ./node_modules/nodemon/bin/nodemon.js --exec \"node ./node_modules/ts-node/dist/bin.js\" src/server.ts",
+    "build": "node ./node_modules/typescript/bin/tsc",
     "start": "node dist/server.js",
-    "seed": "ts-node src/seeds/seed.ts",
-    "migrate": "typeorm migration:run -d src/config/database.ts",
-    "test": "jest --forceExit --detectOpenHandles"
+    "seed": "node ./node_modules/ts-node/dist/bin.js src/seeds/seed.ts",
+    "migrate": "node ./node_modules/ts-node/dist/bin.js src/scripts/init-scylla.ts",
+    "test": "node ./node_modules/jest/bin/jest.js --forceExit --detectOpenHandles"
   },
   "dependencies": {
+    "cassandra-driver": "^4.7.2",
     "express": "^4.18.2",
     "ethers": "^6.9.0",
     "ioredis": "^5.3.2",

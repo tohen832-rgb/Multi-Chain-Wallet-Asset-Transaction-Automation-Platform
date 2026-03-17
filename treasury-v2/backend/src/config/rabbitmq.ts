@@ -1,7 +1,7 @@
-import amqplib, { Channel, Connection } from 'amqplib';
+import amqplib, { Channel, ChannelModel } from 'amqplib';
 import { env } from './env';
 import { logger } from './logger';
-let connection: Connection;
+let connection: ChannelModel;
 let channel: Channel;
 export async function connectRabbitMQ() {
   connection = await amqplib.connect(env.rabbitmqUrl);

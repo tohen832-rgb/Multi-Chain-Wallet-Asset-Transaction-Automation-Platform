@@ -11,8 +11,8 @@ treasury-distributor/
 
 ## Quick Start
 ```bash
-# 1. Start database + redis + rabbitmq
-docker compose up -d postgres redis rabbitmq
+# 1. Start ScyllaDB + redis + rabbitmq
+docker compose up -d scylladb redis rabbitmq
 
 # 2. Backend
 cd backend && npm install && npm run dev
@@ -20,6 +20,10 @@ cd backend && npm install && npm run dev
 # 3. Frontend (new terminal)
 cd frontend && npm install && npm run dev
 ```
+
+If port `3000` is already in use, the frontend dev server will automatically start on the next available port instead.
+
+ScyllaDB now listens on `9042`, and the backend auto-creates its keyspace and auth/session tables on startup.
 
 ## Default Users
 | Email | Password | Role |
