@@ -1,0 +1,127 @@
+═══════════════════════════════════════════════════════════════
+  INTEGRATION & QUICK REFERENCE (UPDATED)
+  Matches existing UI + adds all missing features
+═══════════════════════════════════════════════════════════════
+
+
+  HOW THIS UPDATE WORKS
+  ─────────────────────
+  Your existing app has 3 modals: Create Swap Task, Create Task,
+  Create Withdraw Task. These prompts KEEP your existing UI and ADD
+  what's missing on top of it.
+
+  What changes in existing screens:
+  ✏️ "Private Key" textarea → replaced with wallet dropdown
+  ✏️ Create Swap modal → adds MEV toggle, chunk settings
+  ✏️ Create Task modal → adds campaign settings, template, return wallet, CSV upload
+  ✏️ Withdraw modal → adds status preview, method selector, time-lock validation
+
+  What's completely new:
+  🆕 Login page (gates everything)
+  🆕 Dashboard page (task overview + stats)
+  🆕 Task detail page (live monitoring + controls)
+  🆕 Admin pages (templates, users, wallets, return addresses)
+  🆕 Log viewer page
+  🆕 Sidebar navigation
+  🆕 Socket.io real-time updates
+  🆕 Backend: KMS wallet vault, nonce manager, gas monitor, audit trail
+
+
+  EXECUTION ORDER PER MEMBER
+  ──────────────────────────
+
+  MEMBER 1 (Wallet Service):
+  Step 1: KMS wallet vault (replaces raw key input) ← DO THIS FIRST
+  Step 2: Upgrade Create Swap modal
+  Step 3: Upgrade Create Task modal
+  Step 4: Upgrade Withdraw modal  
+  Step 5: Nonce manager backend
+  Step 6: Swap execution engine
+  Step 7: Return wallet + time-lock
+  Step 8: Tests + Docker
+
+  MEMBER 2 (Contract Service):
+  Step 1: Write Solidity contracts
+  Step 2: Template registry
+  Step 3: Contract deployer (powers Create Task submit)
+  Step 4: Airdrop engine + gas monitor
+  Step 5: Withdraw system (powers Withdraw modal)
+  Step 6: Tests + Docker
+
+  MEMBER 3 (Dashboard Service):
+  Step 1: Auth system + login page
+  Step 2: Main dashboard page
+  Step 3: Task detail page (live monitoring)
+  Step 4: Campaign orchestrator
+  Step 5: Socket.io real-time
+  Step 6: Admin pages
+  Step 7: Logging + audit trail
+  Step 8: Sidebar + navigation layout
+  Step 9: Tests + Docker
+
+
+  PRIORITY ORDER (if short on time)
+  ──────────────────────────────────
+  🔴 Critical (do first):
+     1. Member 1 Step 1: Replace private key with KMS
+     2. Member 3 Step 1: Add login/auth
+     3. Member 1 Step 4: Upgrade withdraw modal (time-lock)
+  
+  🟡 Important (do second):
+     4. Member 2 Step 1: Solidity contracts
+     5. Member 2 Step 4: Airdrop engine
+     6. Member 3 Step 2-3: Dashboard + task detail
+     7. Member 1 Step 5: Nonce manager
+  
+  🟢 Enhancement (do last):
+     8. Member 3 Step 5: Socket.io real-time
+     9. Member 3 Step 6: Admin pages
+    10. Member 3 Step 7: Logging
+    11. Member 1 Step 2-3: Modal upgrades (MEV, chunks)
+
+
+  DOCKER COMPOSE (run after all services built)
+  ──────────────────────────────────────────────
+
+@workspace Generate docker-compose.yml in project root:
+
+Services:
+- wallet-service: port 3001, depends_on postgres+redis+rabbitmq
+- contract-service: port 3002, depends_on postgres+redis+rabbitmq
+- dashboard-service: port 3000, depends_on all
+- postgres:16-alpine: port 5432, volume postgres_data
+- redis:7-alpine: port 6379, volume redis_data
+- rabbitmq:3-management: ports 5672+15672, volume rabbitmq_data
+
+Shared env: JWT_SECRET, DATABASE_URL, REDIS_URL, RABBITMQ_URL, RPC_URL
+Service-specific: VAULT_MASTER_KEY, WALLET_SERVICE_URL, CONTRACT_SERVICE_URL
+
+Generate: docker-compose.yml, .env, Makefile (up/down/logs/test/migrate/seed)
+
+
+  INTER-SERVICE EVENT MAP
+  ───────────────────────
+  wallet-service publishes:
+    WALLET_GENERATED → dashboard-service
+    WALLET_FUNDED → dashboard-service
+    SWAP_COMPLETED → contract-service + dashboard-service
+    SWAP_FAILED → dashboard-service
+    RETURN_COMPLETED → dashboard-service
+
+  contract-service publishes:
+    CONTRACT_DEPLOYED → dashboard-service
+    CONTRACT_FUNDED → dashboard-service
+    AIRDROP_STARTED → dashboard-service
+    AIRDROP_PAUSED → dashboard-service
+    AIRDROP_STOPPED → dashboard-service
+    WITHDRAW_COMPLETED → wallet-service + dashboard-service
+
+  dashboard-service consumes ALL events → logs + state updates + Socket.io
+
+
+  FILES IN THIS PACKAGE
+  ─────────────────────
+  📄 updated_member1.txt    — 8 steps: wallet vault, swap, return, nonce
+  📄 updated_member2.txt    — 6 steps: contracts, templates, airdrop, withdraw
+  📄 updated_member3.txt    — 9 steps: auth, dashboard, monitoring, logs, admin
+  📄 updated_integration.txt — This file: priority order + docker + events
