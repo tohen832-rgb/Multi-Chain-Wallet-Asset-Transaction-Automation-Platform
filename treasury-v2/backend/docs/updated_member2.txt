@@ -1,0 +1,386 @@
+═══════════════════════════════════════════════════════════════
+  MEMBER 2 — SERVICE B: CONTRACT & AIRDROP ENGINE (UPDATED)
+  Builds on existing "Create Task" modal pattern
+  Adds: template registry, airdrop engine, gas monitor, withdraw
+═══════════════════════════════════════════════════════════════
+
+
+───────────────────────────────────────
+ STEP 1: SOLIDITY CONTRACTS
+───────────────────────────────────────
+
+@workspace Write the Solidity smart contracts for the Treasury Distributor system. These contracts are what get deployed when users set "Contract Count: 5" in the Create Task modal.
+
+FILE 1: contracts/TreasuryDistributor.sol
+Solidity ^0.8.20. Import OpenZeppelin: Ownable, Pausable, ReentrancyGuard, IERC20, SafeERC20.
+
+State variables:
+- IERC20 public token (the token being distributed)
+- uint256 public totalDistributed
+- uint256 public totalTransfers  
+- bool public isStopped
+- uint256 public transferLimit (max transfers allowed, set at init)
+
+Constructor(address _token, address _owner, uint256 _transferLimit):
+- Set token, transferLimit, transfer ownership to _owner (the sub-wallet)
+
+Functions:
+- batchTransfer(address[] calldata recipients, uint256[] calldata amounts)
+  * onlyOwner, whenNotPaused, nonReentrant
+  * require(!isStopped)
+  * require(recipients.length == amounts.length)
+  * require(recipients.length <= 200, "Batch too large")
+  * require(totalTransfers + recipients.length <= transferLimit, "Transfer limit exceeded")
+  * Loop: SafeERC20.safeTransfer for each
+  * Update totalDistributed and totalTransfers
+  * emit BatchCompleted(batchId, recipients.length, totalAmount)
+
+- pause() external onlyOwner — freezes all transfers
+- unpause() external onlyOwner — require(!isStopped)
+- stop() external onlyOwner — permanent stop, also pauses
+
+- withdrawRemaining() external onlyOwner nonReentrant
+  * require(paused() || isStopped)
+  * Transfer ALL token balance to owner()
+  * emit WithdrawCompleted(balance, owner())
+
+- stopAndWithdraw() external onlyOwner nonReentrant
+  * ATOMIC: isStopped=true, _pause(), withdraw all in ONE tx
+  * This is what "Stop and Withdraw" radio button triggers in the UI
+
+- getStatus() external view returns (
+    uint256 _totalDistributed,
+    uint256 _totalTransfers, 
+    uint256 _balance,
+    uint256 _transferLimit,
+    bool _isPaused,
+    bool _isStopped
+  )
+
+Events:
+- BatchCompleted(uint256 indexed batchId, uint256 count, uint256 amount)
+- Stopped(address indexed by)
+- WithdrawCompleted(uint256 amount, address indexed to)
+
+Security: No selfdestruct, no delegatecall, checks-effects-interactions pattern.
+
+FILE 2: contracts/TreasuryDistributorFactory.sol
+- Admin-controlled factory for deploying distributor contracts
+- mapping(bytes32 => bool) public approvedTemplates
+- function deploy(address token, address owner, uint256 transferLimit, bytes32 salt) external returns (address)
+  * Uses CREATE2 for deterministic addresses
+  * Returns deployed contract address
+- function computeAddress(...) external view — predict address before deploy
+- Events: ContractDeployed(address indexed contract, address indexed owner, address token)
+
+FILE 3: test/TreasuryDistributor.test.ts (Hardhat + ethers):
+- Test all functions
+- Test transferLimit enforcement (should revert when exceeded)
+- Test stopAndWithdraw atomic behavior
+- Test that pause blocks batchTransfer
+- Test gas: batchTransfer < 50k gas per recipient
+- Test edge cases: empty arrays, 200+ recipients, zero amounts
+
+
+───────────────────────────────────────
+ STEP 2: TEMPLATE REGISTRY
+───────────────────────────────────────
+
+@workspace Create the template registry service. This powers the "Select Template" dropdown that we're adding to the Create Task modal.
+
+When the Create Task modal loads, it fetches GET /api/templates?status=APPROVED to populate the dropdown showing: "TreasuryDistributor v1.0 (approved)"
+
+TemplateRegistryService (template-registry.service.ts):
+
+1. registerTemplate(name, version, bytecode, abi):
+   - Compute keccak256 hash of bytecode
+   - Save to DB: status = PENDING
+   - Return { templateId, bytecodeHash }
+
+2. approveTemplate(templateId, adminUserId):
+   - Set status = APPROVED
+   - Register hash on factory contract on-chain
+   - Return updated template
+
+3. getApprovedTemplates():
+   - Return all APPROVED templates for the UI dropdown
+   - Format: [{ id, name, version, bytecodeHash (truncated), approvedAt }]
+
+4. validateBeforeDeploy(templateId):
+   - Verify status === APPROVED
+   - Verify hash still registered on-chain
+   - Return { valid: true, abi, bytecode }
+
+5. deprecateTemplate(templateId): Set DEPRECATED, block new deploys
+
+Database: contract_templates table:
+  id, name, version, bytecode_hash, abi_json, compiler_version,
+  status (PENDING|APPROVED|DEPRECATED), approved_by, approved_at, created_at
+
+API endpoints:
+  POST /api/templates — admin only
+  PUT /api/templates/:id/approve — admin only
+  GET /api/templates?status=APPROVED — for Create Task dropdown
+  GET /api/templates/:id
+
+
+───────────────────────────────────────
+ STEP 3: CONTRACT DEPLOYER
+───────────────────────────────────────
+
+@workspace Create the deployer service. This is triggered when the user clicks "Submit" on the Create Task modal.
+
+The Create Task form submits:
+{
+  walletId: "uuid",
+  contractCount: 5,
+  templateId: "uuid",
+  walletTransfers: {
+    transferETH: true,
+    ethAmount: "0.003282",
+    transferERC20: true,
+    tokens: [
+      { address: "0x2260...C599", symbol: "WBTC", amount: "0.000003" },
+      { address: "0xC02a...6Cc2", symbol: "WETH", amount: "0.000082" },
+      { address: "0xDa5E...bEf6", symbol: "WLFI", amount: "1.82" },
+      { address: "0xE41d...F498", symbol: "ZRX", amount: "1.72" }
+    ]
+  },
+  contractTransfers: {
+    transferETH: true,
+    ethAmount: "0.001641",
+    transferERC20: true,
+    tokens: [same format as above]
+  },
+  campaignSettings: {
+    name: "Campaign #23",
+    transferLimit: 5000,
+    gasThreshold: 50,
+    returnAddress: "0x..."
+  },
+  recipientsCsv: [base64 encoded file],
+  autoDeploy: true
+}
+
+DeployerService (deployer.service.ts):
+
+1. createTask(params):
+   This orchestrates the FULL flow from Create Task modal:
+
+   a. Get main wallet signer from WalletVault (by walletId)
+   b. For i = 0 to contractCount-1:
+      
+      PHASE 1: Generate sub-wallet
+      - Derive sub-wallet from master HD path
+      - Register in WalletVault
+      - Record: sub_wallet address for this contract instance
+      
+      PHASE 2: Wallet Transfers (Main → Sub-wallet)
+      - If transferETH: send ethAmount ETH from main to sub-wallet
+      - If transferERC20: for each token, send amount from main to sub-wallet
+      - Wait for all confirmations
+      - This matches the "Wallet Transfers" section in the UI
+      
+      PHASE 3: Deploy Contract
+      - Get approved template from registry
+      - Deploy via factory with sub-wallet as owner
+      - Wait for confirmation
+      - Record deployed contract address
+      
+      PHASE 4: Contract Transfers (Sub-wallet → Contract)
+      - If transferETH: send ethAmount ETH from sub-wallet to contract
+      - If transferERC20: for each token, approve + transfer to contract
+      - Wait for all confirmations
+      - This matches the "Contract Transfers" section in the UI
+      
+   c. Save task with all contract addresses, sub-wallet addresses
+   d. Return { taskId, contracts: [{ address, subWallet, status }] }
+
+2. getTaskStatus(taskId):
+   - Return full status of all contracts in this task
+   - Used by the task list / dashboard to show progress
+
+3. Error handling per contract instance:
+   - If any phase fails: record error, continue to next contract
+   - Don't fail entire batch for one contract failure
+   - Return partial results with error details
+
+API endpoints:
+  POST /api/tasks — create task (from modal submit)
+  GET /api/tasks — list all tasks
+  GET /api/tasks/:id — task detail with all contracts
+  GET /api/tasks/:id/contracts — list deployed contracts for a task
+
+
+───────────────────────────────────────
+ STEP 4: AIRDROP EXECUTION ENGINE
+───────────────────────────────────────
+
+@workspace Create the airdrop engine. This runs AFTER contracts are deployed and funded. A new "Start Airdrop" button appears on the task detail page.
+
+AirdropService (airdrop.service.ts):
+
+1. startAirdrop(taskId, contractAddress, config):
+   config comes from Campaign Settings in Create Task modal:
+   {
+     recipientList: [{ address, amount }],  // from uploaded CSV
+     batchSize: 100,                         // recipients per tx
+     transferLimit: 5000,                    // from "Transfer Limit" field
+     gasThreshold: 50                        // from "Gas Threshold" field (Gwei)
+   }
+   
+   a. Verify contract is deployed and funded
+   b. Parse recipient list from CSV
+   c. Validate all addresses (ethers.isAddress), remove invalid
+   d. Split into batches of batchSize
+   e. Queue all batches in Redis: "airdrop:{contractAddress}:queue"
+   f. Start batch processor
+   g. Return { airdropId, totalBatches, totalRecipients }
+
+2. processBatch(airdropId, batchId):
+   a. CHECK GAS (OFF-CHAIN — this is the critical part):
+      - gasPrice = await gasMonitor.getCurrentGasPrice()
+      - If gasPrice > config.gasThreshold Gwei:
+        * Set batch status = GAS_PAUSED
+        * DO NOT submit tx
+        * Schedule retry in 60 seconds
+        * Return
+      
+   b. CHECK TRANSFER LIMIT:
+      - currentCount = await contract.totalTransfers()
+      - If currentCount + batch.length > config.transferLimit:
+        * Trim batch to fit remaining
+        * Or if currentCount >= limit: trigger stopAndWithdraw
+        * Return
+      
+   c. EXECUTE:
+      - Get sub-wallet signer from WalletVault
+      - Get nonce from NonceManager  
+      - Estimate gas, add 30% buffer
+      - Call contract.batchTransfer(recipients, amounts)
+      - Wait confirmation
+      
+   d. ON SUCCESS:
+      - Update batch: COMPLETED, txHash, gasUsed
+      - Process next batch
+      
+   e. ON FAILURE:
+      - retryCount < 3: requeue with 1.3x gas bump
+      - retryCount >= 3: mark FAILED, continue to next batch
+
+3. pauseAirdrop(airdropId): Set Redis flag, current batch finishes
+4. resumeAirdrop(airdropId): Clear flag, restart processor
+5. stopAirdrop(airdropId): Set stopped flag, trigger withdraw
+
+GasMonitorService (gas-monitor.service.ts):
+- getCurrentGasPrice(): provider.getFeeData(), cache 15s in Redis
+- isAcceptable(thresholdGwei): Compare current vs threshold
+- getHistory(hours): Return price history for chart
+- COMMENT IN CODE: "Gas checking is OFF-CHAIN. The contract CANNOT check gas prices. The backend decides whether to submit."
+
+API endpoints:
+  POST /api/airdrops/:contractAddress/start { recipientList, batchSize }
+  POST /api/airdrops/:contractAddress/pause
+  POST /api/airdrops/:contractAddress/resume  
+  POST /api/airdrops/:contractAddress/stop
+  GET /api/airdrops/:contractAddress/status
+  GET /api/airdrops/:contractAddress/batches?page=1&limit=20
+  GET /api/gas/current — returns { gasPrice, isAcceptable, threshold }
+  GET /api/gas/history?hours=24
+
+Database: airdrop_batches table:
+  id, airdrop_id, contract_address, batch_number, recipients_json,
+  amounts_json, tx_hash, status (QUEUED|PROCESSING|COMPLETED|FAILED|GAS_PAUSED),
+  gas_used, transfer_count, retry_count, error_message, created_at, completed_at
+
+
+───────────────────────────────────────
+ STEP 5: WITHDRAW SYSTEM (backend for withdraw modal)
+───────────────────────────────────────
+
+@workspace Create the withdrawal system backend. This powers the existing "Create Withdraw Task" modal.
+
+The modal currently submits:
+{
+  sourceTask: "#22 — 0xb625B9...f5D676 (1 Contracts)",
+  targetAddress: "0x..."
+}
+
+With our upgrades, it now submits:
+{
+  sourceTaskId: 22,
+  contractAddress: "0xb625B9...f5D676",
+  targetAddress: "0x...",
+  method: "stopAndWithdraw" | "pauseThenWithdraw",
+  isWhitelisted: boolean
+}
+
+WithdrawService (withdraw.service.ts):
+
+1. getWithdrawPreview(sourceTaskId, contractAddress):
+   Called when modal opens to populate the "Contract Status" info panel.
+   - Call contract.getStatus() on-chain
+   - Return:
+     {
+       status: "active" | "paused" | "stopped",
+       remainingBalance: "1250.00",
+       remainingBalanceUSD: "$3,400",
+       totalDistributed: "3750.00",
+       totalTransfers: 3750,
+       transferLimit: 5000,
+       contractAddress: "0xb625...D676"
+     }
+
+2. executeWithdraw(params):
+   a. Get sub-wallet signer from WalletVault
+   b. Get contract instance
+   
+   c. If method === "pauseThenWithdraw":
+      Phase 1: contract.pause() — wait confirmation
+      Phase 2: Verify paused, wait for pending batches
+      Phase 3: contract.withdrawRemaining() — wait confirmation
+   
+   d. If method === "stopAndWithdraw":
+      Single tx: contract.stopAndWithdraw() — wait confirmation
+   
+   e. Verify sub-wallet received tokens on-chain
+   f. Record withdraw transaction
+   g. Publish WITHDRAW_COMPLETED event
+   h. Return { txHash, withdrawnAmount, method }
+
+3. Edge case handlers:
+   - Contract already stopped: Skip stop, just withdraw
+   - Contract balance is 0: Return success with 0 amount
+   - Tx reverts: Retry with 1.5x gas, max 3 tries
+   - Sub-wallet has no gas: Fund with 0.01 ETH from main wallet first
+
+API endpoints:
+  GET /api/withdraw/preview/:taskId/:contractAddress
+  POST /api/withdraw/execute
+  GET /api/withdraw/:taskId/status
+
+
+───────────────────────────────────────
+ STEP 6: TESTS + DOCKER
+───────────────────────────────────────
+
+@workspace Generate tests and deployment config for contract-service:
+
+1. Hardhat tests (test/):
+   - TreasuryDistributor.test.ts — all functions, transferLimit enforcement
+   - TreasuryDistributorFactory.test.ts — deploy via factory, CREATE2 address
+
+2. Unit tests (__tests__/):
+   - template-registry.test.ts — approve, validate, deprecate
+   - deployer.test.ts — mock factory, test multi-contract deployment
+   - airdrop.test.ts — mock contract+Redis, test batch processing, gas pause
+   - withdraw.test.ts — test two-phase and atomic flows
+
+3. Dockerfile:
+   Multi-stage, node:20-slim, port 3002, include compiled contracts
+
+4. Migrations:
+   - contract_templates, deployed_contracts, airdrop_batches tables
+
+5. hardhat.config.ts:
+   Networks: localhost, sepolia, mainnet. Optimizer runs: 200. Gas reporter ON.

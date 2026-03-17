@@ -1,0 +1,428 @@
+═══════════════════════════════════════════════════════════════
+  MEMBER 1 — SERVICE A: WALLET & FUNDING ENGINE (UPDATED)
+  Matches your existing UI: dark theme, modal dialogs,
+  token rows, toggle switches, batch key import
+═══════════════════════════════════════════════════════════════
+
+
+───────────────────────────────────────
+ STEP 1: FIX — Replace private key field with KMS wallet selector
+───────────────────────────────────────
+
+@workspace I have an existing "Create Swap Task" modal and "Create Task" modal that currently have a "Main Wallet Private Key" textarea where users paste raw 0x... private keys (one per line for batch import). This is a critical security risk.
+
+Replace the private key textarea in ALL modals with a secure wallet management system:
+
+1. Create a WalletVault backend service (wallet-vault.service.ts):
+   - registerWallet(label, privateKey): 
+     * Encrypt private key with AES-256-GCM using env VAULT_MASTER_KEY
+     * Store ONLY encrypted blob + wallet address in DB
+     * Return { walletId, address, label } — NEVER return the key
+   - getWalletSigner(walletId):
+     * Decrypt key in-memory, create ethers.Wallet
+     * Return signer (backend only, never sent to frontend)
+   - listWallets(): Return [{ walletId, address, label, balance }] — no keys
+   - deleteWallet(walletId): Remove encrypted key from DB
+   - importBatchWallets(privateKeys[]): Register multiple, return addresses only
+
+2. DB table "wallets":
+   - id (uuid), label, address, encrypted_key (blob), iv (blob), 
+     auth_tag (blob), created_at, last_used_at
+
+3. API endpoints:
+   POST /api/wallets/register { label, privateKey } — one-time import
+   POST /api/wallets/import-batch { privateKeys[] } — batch import (one-time)
+   GET /api/wallets — list (returns addresses only, never keys)
+   DELETE /api/wallets/:id
+   GET /api/wallets/:id/balance
+
+4. Update the frontend modals:
+   REPLACE the "Main Wallet Private Key" textarea with:
+   - A dropdown/select labeled "* Select Wallet" showing:
+     "Wallet A — 0x7Fc6...DaE9 (3.5 ETH)"
+     "Wallet B — 0xb625...D676 (1.2 ETH)"
+   - Support multi-select for batch operations (replaces batch key import)
+   - An "+ Import Wallet" button that opens a SEPARATE secure modal:
+     * Textarea for private key(s) — one per line
+     * Optional label field
+     * "Import" button
+     * After import: key is encrypted and stored, textarea is cleared
+     * This modal is ONLY shown once during initial setup
+   - After import, the wallet appears in the dropdown by address
+   
+Keep the existing dark theme styling:
+- Background: dark (#1e1e2e or your existing dark bg)
+- Inputs: dark bordered fields
+- Select dropdown: same style as your existing "Fee Tier" dropdown
+- Blue "Submit" button, gray "Cancel" button
+
+The key difference: private keys enter the system ONCE during import,
+then are referenced by wallet ID forever after. The key never appears
+in any UI field again.
+
+
+───────────────────────────────────────
+ STEP 2: UPGRADE — Create Swap Task modal (match existing + add missing)
+───────────────────────────────────────
+
+@workspace I have an existing "Create Swap Task" modal with these fields:
+- Main Wallet Private Key (textarea, batch import) — NOW replaced with wallet selector from Step 1
+- Token In (text input, e.g. "USDT / 0x...")
+- Swap Targets list: rows of [Token Name (0xAddr)] [amount] [≈ $USD] [remove btn]
+  Current tokens: AAVE, APE, BAT, cbBTC, COMP, CRV, DAI, ENS, ETH, FET
+- Slippage (%) — input, default 0.5
+- Fee Tier — dropdown, default 0.3%
+- Cancel / Submit buttons
+
+Keep ALL existing fields and styling exactly as-is. ADD these missing features to the same modal:
+
+1. After the wallet selector (replacing private key), add:
+   "* Sub-wallet Assignment" — dropdown: "Auto-generate new" or select existing sub-wallet
+   
+2. After Slippage field, add new section:
+   "MEV Protection" — toggle switch (same style as Transfer ETH toggles):
+   [toggle] Use Flashbots Protect
+   When ON, show extra field:
+   "Flashbots RPC" — text input, default: "https://rpc.flashbots.net"
+
+3. After Fee Tier, add new section:
+   "Large Swap Settings"
+   [toggle] Split large swaps into chunks
+   When ON, show:
+   "Chunk Size" — number input (e.g. "5" ETH per chunk)
+   "Delay Between Chunks (seconds)" — number input, default 30
+
+4. At bottom of Swap Targets list, add a summary row:
+   "Total Value: ≈ $52.06" (sum of all target ≈ values)
+
+5. Add a "Swap Strategy" dropdown above the targets list:
+   Options: "Market (immediate)" | "TWAP (time-weighted)" | "Limit (price target)"
+
+Keep exact same dark theme, same token row format:
+[Token Name (0xABCD...EF12)] [Amount input] [≈ $1.00] [red remove ⊖]
+Same "+ Add Token" behavior. Same Cancel (gray) / Submit (blue) buttons.
+
+
+───────────────────────────────────────
+ STEP 3: UPGRADE — Create Task modal (match existing + add missing)
+───────────────────────────────────────
+
+@workspace I have an existing "Create Task" modal with these sections:
+- Main Wallet Private Key (textarea) — NOW wallet selector
+- Contract Count: number input (e.g. 5)
+- "Wallet Transfers (Main → Sub-wallet)" section with "Reload" button:
+  * Transfer ETH toggle (blue when on)
+  * Sub-wallet ETH Amount: input + ≈ $USD
+  * Transfer ERC20 toggle
+  * Token rows: [WBTC (0x2260...C599)] [0.000003] [≈ $0.22] [remove]
+  * [WETH, WLFI, ZRX] same format
+  * "+ Add Token" button
+- "Contract Transfers (Sub-wallet → Contract)" section with "Reload":
+  * Transfer ETH toggle
+  * Contract ETH Amount: input + ≈ $USD
+  * Transfer ERC20 toggle
+  * Same token rows + "+ Add Token"
+- Cancel / Submit buttons
+
+Keep ALL existing fields and styling. ADD these missing features:
+
+1. After Contract Count, add new section:
+   "Campaign Settings" (bordered section like your existing sections):
+   - "Campaign Name" — text input
+   - "Transfer Limit" — number input with helper text "Stop airdrop after N transfers (e.g. 5000)"
+   - "Gas Threshold (Gwei)" — number input with helper text "Pause if gas exceeds this (e.g. 50)"
+   
+2. Add new section after Contract Transfers:
+   "Contract Template" (bordered section):
+   - "Select Template" — dropdown showing approved templates:
+     "TreasuryDistributor v1.0 (approved)" 
+     "TreasuryDistributor v1.1 (approved)"
+   - Show template hash preview: "Hash: 0xab12...ef89"
+   - "Auto-deploy after funding" — toggle switch
+
+3. Add new section:
+   "Return Wallet" (bordered section):
+   - "Return Address" — text input for 0x address
+   - Warning text: "⚠ Changing this address requires 24-hour time-lock"
+   - "Use main wallet as return" — checkbox (auto-fills the address)
+
+4. Add new section:
+   "Airdrop Recipients" (bordered section):
+   - "Upload CSV" — file input button, accepts .csv
+   - Helper text: "CSV format: address,amount (one per line)"
+   - After upload, show preview:
+     "245 recipients loaded — Total: 12,500 TOKEN"
+   - "Preview" button to show first 10 rows in a mini table
+
+Keep exact same styling: dark theme, bordered sections with white headers,
+blue toggle switches, "Reload" buttons, token row format, ≈ $USD values.
+
+
+───────────────────────────────────────
+ STEP 4: UPGRADE — Create Withdraw Task modal (add protections)
+───────────────────────────────────────
+
+@workspace I have an existing "Create Withdraw Task" modal with:
+- Source Task: dropdown (e.g. "#22 — 0xb625B9...f5D676 (1 Contracts)")
+- Target Address: text input (0x...)
+- Cancel / Submit buttons
+
+Keep this layout but ADD security protections:
+
+1. After "Source Task" dropdown, add read-only info panel:
+   (bordered section, dark background, showing contract status)
+   "Contract Status"
+   - Status: Active / Paused / Stopped — as a colored badge
+   - Remaining Balance: 1,250.00 TOKEN (≈ $3,400)
+   - Total Distributed: 3,750.00 TOKEN
+   - Total Transfers: 3,750 / 5,000
+
+2. Before "Target Address", add:
+   "Withdraw Method" — radio buttons:
+   ○ Pause then Withdraw (safe — 2 transactions)
+   ● Stop and Withdraw (atomic — 1 transaction, cannot resume)
+
+3. Change "Target Address" to a dropdown + manual entry:
+   "* Target Address" — dropdown of whitelisted addresses:
+   "Return Wallet A — 0x1234...5678 (whitelisted)"
+   "Return Wallet B — 0x9abc...def0 (whitelisted)"
+   "── Enter custom address ──"
+   When custom selected, show text input
+   
+4. Add validation warnings below Target Address:
+   - If address is NOT in whitelist: 
+     "⚠ This address is not whitelisted. 24-hour time-lock will apply."
+   - If address was changed recently:
+     "🔒 Time-lock active. Withdraw available after: 2026-03-18 12:00 UTC"
+     Submit button becomes disabled and grayed out
+
+5. Add "Withdraw Summary" section before buttons:
+   "You are withdrawing 1,250 TOKEN (≈ $3,400) from contract #22"
+   "To: 0x1234...5678"
+   "Method: Atomic Stop and Withdraw"
+
+6. Change Submit button to say "Confirm Withdraw" with a confirmation step:
+   First click: button text changes to "Are you sure? Click again"
+   Second click: actually submits
+
+Keep dark theme. Same modal size. Same Cancel/Submit pattern.
+
+
+───────────────────────────────────────
+ STEP 5: NEW — Nonce Manager service (backend only)
+───────────────────────────────────────
+
+@workspace Create a NonceManagerService for the wallet-service backend. This handles transaction ordering to prevent nonce collisions when automating multiple sub-wallet transactions.
+
+NonceManagerService (nonce-manager.service.ts):
+Uses Redis for lock-free nonce tracking per wallet address.
+
+1. acquireNonce(walletAddress: string):
+   - Redis key: "nonce:{address}"
+   - If key doesn't exist: fetch from chain via provider.getTransactionCount(address, 'pending')
+   - Atomically increment and return
+   - Set TTL lock: "nonce-lock:{address}:{nonce}" = true, expire 120s
+   - Return { nonce, lockId }
+
+2. confirmNonce(walletAddress, nonce):
+   - Remove lock key
+   - Update confirmed nonce counter
+
+3. releaseNonce(walletAddress, nonce):
+   - Called when tx was never submitted (error before send)
+   - Remove lock, do NOT increment
+
+4. detectStuck(walletAddress):
+   - Scan lock keys older than 5 minutes
+   - Return stuck nonce list
+   - Log warning
+
+5. replaceByFee(walletAddress, stuckNonce, newGasPrice):
+   - Build replacement tx with same nonce, higher gas
+   - Sign and submit
+   - Return new txHash
+
+6. resyncFromChain(walletAddress):
+   - Fetch on-chain nonce via getTransactionCount(address, 'latest')
+   - Reset Redis counter
+   - Clear all locks for this address
+   - Return { syncedNonce }
+
+7. Redis data structure:
+   - "nonce:current:{address}" — current nonce counter (string, INCR)
+   - "nonce:lock:{address}:{nonce}" — lock with TTL (SET EX 120)
+   - "nonce:pending:{address}" — sorted set of pending nonces with timestamps
+
+Include a background job that runs every 60 seconds:
+- For each active wallet, call detectStuck()
+- If stuck nonces found: attempt replaceByFee with 1.3x gas
+- If replaceByFee fails 3 times: call resyncFromChain()
+- Log all actions
+
+Write jest tests mocking Redis and ethers provider.
+
+
+───────────────────────────────────────
+ STEP 6: NEW — Swap execution engine (backend)
+───────────────────────────────────────
+
+@workspace Create the swap execution engine that powers the "Create Swap Task" modal.
+
+When user submits the Create Swap Task form, the backend receives:
+{
+  walletId: "uuid",          // from wallet selector (not raw key)
+  tokenIn: "USDT/0x...",
+  targets: [
+    { token: "AAVE", address: "0x7Fc6...DaE9", amount: 0.00831 },
+    { token: "APE", address: "0x4d22...4381", amount: 9.79 },
+    { token: "DAI", address: "0x6B17...1d0F", amount: 3.00 },
+    // ... all targets from the UI list
+  ],
+  slippage: 0.5,
+  feeTier: 3000,             // 0.3% = 3000 in Uniswap V3
+  useFlashbots: false,       // from new toggle
+  chunkEnabled: false,       // from new toggle
+  chunkSize: "5",
+  chunkDelay: 30
+}
+
+SwapService (swap.service.ts):
+
+1. createSwapTask(params):
+   a. Get wallet signer from WalletVault (by walletId, NOT raw key)
+   b. For each target in params.targets:
+      - Build Uniswap V3 exactInputSingle call:
+        tokenIn = params.tokenIn address
+        tokenOut = target.address
+        fee = params.feeTier
+        amountIn = calculated from target.amount and current price
+        amountOutMinimum = target.amount * (1 - params.slippage/100)
+        deadline = block.timestamp + 300
+      - If params.chunkEnabled and amountIn > chunkSize:
+        Split into chunks, queue each with delay
+      - If params.useFlashbots:
+        Submit via Flashbots RPC endpoint
+      - Else:
+        Submit via regular provider
+   c. Track each swap as a transaction record
+   d. Return taskId for monitoring
+
+2. Uniswap integration:
+   - Import Router ABI and Quoter ABI as constants
+   - Router address: 0xE592427A0AEce92De3Edee1F18E0157C05861564 (V3)
+   - Quoter address: 0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6 (V3)
+   - Handle token approval before first swap per token
+   - Use multicall for batch swaps when possible
+
+3. Price oracle for the "≈ $USD" display in UI:
+   GET /api/swap/quote { tokenIn, tokenOut, amount }
+   - Call Uniswap Quoter.quoteExactInputSingle()
+   - Fetch USD price from Coingecko or Chainlink
+   - Return { amountOut, usdValue, priceImpact }
+   - Cache quotes in Redis for 30 seconds
+
+4. Error handling:
+   - INSUFFICIENT_INPUT_AMOUNT: Return specific error to UI
+   - SLIPPAGE_EXCEEDED: Retry with 1.5x slippage, max 2 retries
+   - DEADLINE_EXPIRED: Rebuild and resubmit
+   - APPROVAL_FAILED: Check allowance, re-approve with max uint256
+
+
+───────────────────────────────────────
+ STEP 7: NEW — Return wallet service with time-lock
+───────────────────────────────────────
+
+@workspace Create the return wallet service that powers the "Create Withdraw Task" modal.
+
+When user submits the withdraw form, backend receives:
+{
+  sourceTaskId: 22,
+  contractAddress: "0xb625B9...f5D676",
+  targetAddress: "0x...",
+  method: "stopAndWithdraw"  // or "pauseThenWithdraw"
+}
+
+ReturnService (return.service.ts):
+
+1. initiateWithdraw(params):
+   a. Get contract instance from deployed_contracts table
+   b. Get wallet signer from WalletVault (sub-wallet that owns the contract)
+   c. If method === "pauseThenWithdraw":
+      - Call contract.pause(), wait confirmation
+      - Verify contract.paused() === true on-chain
+      - Wait 5 seconds for any pending batch txs
+      - Call contract.withdrawRemaining(), wait confirmation
+   d. If method === "stopAndWithdraw":
+      - Call contract.stopAndWithdraw() — atomic single tx
+      - Wait confirmation
+   e. Verify token balance received by sub-wallet
+   f. Record transaction
+   g. Publish WITHDRAW_COMPLETED event
+
+2. transferToReturnWallet(campaignId):
+   a. Get sub-wallet balance (all tokens + ETH)
+   b. Get target address from campaign config
+   c. SECURITY CHECK — validateReturnAddress(targetAddress):
+      - Is address in return_address_whitelist? 
+      - If not: check return_address_changes table
+      - If address changed < 24 hours ago: REJECT with time-lock error
+        Return { error: "TIME_LOCK_ACTIVE", unlockAt: timestamp }
+      - If address changed >= 24 hours ago: ALLOW
+   d. Transfer all ERC-20 tokens to target
+   e. Transfer remaining ETH (minus gas reserve of 0.005 ETH) to target
+   f. Publish RETURN_COMPLETED event
+
+3. Address whitelist management:
+   POST /api/return-address/whitelist { address, label }
+   GET /api/return-address/whitelist
+   DELETE /api/return-address/whitelist/:address
+   PUT /api/return-address/:campaignId { newAddress }
+     - Requires re-authentication (fresh JWT < 5 min old)
+     - Records change in return_address_changes with timestamp
+     - Returns { newAddress, activeAfter: "2026-03-18T12:00:00Z" }
+   GET /api/return-address/:campaignId/status
+     - Returns { address, isWhitelisted, timeLockActive, unlockAt }
+
+4. Database tables:
+   return_address_whitelist: id, address, label, added_by, created_at
+   return_address_changes: id, campaign_id, old_address, new_address, 
+     changed_by, changed_at, active_after (changed_at + 24h)
+
+
+───────────────────────────────────────
+ STEP 8: TESTS + DOCKER
+───────────────────────────────────────
+
+@workspace Generate tests and Dockerfile for wallet-service:
+
+1. Unit tests:
+   - wallet-vault.test.ts: Test encryption/decryption, verify raw key never in response
+   - nonce-manager.test.ts: Test acquire/confirm/stuck detection with mock Redis
+   - swap.service.test.ts: Mock Uniswap contracts, test single + chunked swap
+   - return.service.test.ts: Test time-lock enforcement (reject < 24h, allow >= 24h)
+
+2. Integration tests:
+   - swap-flow.test.ts: Submit swap task via API, verify transactions created
+   - withdraw-flow.test.ts: Test full pause->withdraw->return flow
+
+3. Dockerfile (multi-stage):
+   FROM node:20-slim AS build
+   WORKDIR /app
+   COPY package*.json ./
+   RUN npm ci
+   COPY . .
+   RUN npm run build
+
+   FROM node:20-slim AS production
+   WORKDIR /app
+   COPY --from=build /app/dist ./dist
+   COPY --from=build /app/node_modules ./node_modules
+   USER node
+   EXPOSE 3001
+   HEALTHCHECK CMD curl -f http://localhost:3001/health || exit 1
+   CMD ["node", "dist/server.js"]
+
+4. Database migrations:
+   - wallets table (encrypted key storage)
+   - return_address_whitelist table
+   - return_address_changes table
